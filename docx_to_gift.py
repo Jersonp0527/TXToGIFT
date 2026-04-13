@@ -21,8 +21,8 @@ from docx import Document
 # Helpers de detección de líneas
 # ---------------------------------------------------------------------------
 
-OPTION_PATTERN = re.compile(r'^([A-D])[\.\)]\s+(.+)', re.DOTALL)
-ANSWER_PATTERN = re.compile(r'^ANSWER\s*:\s*([A-D]?)\s*$', re.IGNORECASE)
+OPTION_PATTERN = re.compile(r'^([A-Z])[\.\)]\s+(.+)', re.DOTALL)
+ANSWER_PATTERN = re.compile(r'^ANSWER\s*:\s*([A-Z]?)\s*$', re.IGNORECASE)
 MATCHING_ARROW = re.compile(r'\s*(?:→|->)\s*')  # acepta → (unicode) y ->
 
 
@@ -59,27 +59,56 @@ def _normalize_arrow(text: str) -> str:
 # Parser del .docx
 # ---------------------------------------------------------------------------
 
-def parse_docx(filepath: str) -> list[dict]:
+def _resolve_block(block_lines: list[str], answer: str, default_options: int) -> dict | None:
+    """
+    Convierte un bloque de líneas (entre dos ANSWER) en una pregunta.
+
+    Soporta dos modos:
+      - Lettered: si alguna línea matchea `A. …`, `B. …`, etc. Esas líneas son
+        opciones; lo anterior es el texto de la pregunta.
+      - Unlettered: ninguna línea tiene letra. Las últimas N líneas son opciones
+        (N=2 si son Verdadero/Falso, si no `default_options`); el resto es el
+        texto de la pregunta.
+    """
+    if not block_lines:
+        return None
+
+    lettered_idx = [i for i, ln in enumerate(block_lines) if _is_option(ln)]
+
+    if lettered_idx:
+        first_opt = lettered_idx[0]
+        text_lines = block_lines[:first_opt]
+        options = [_parse_option(block_lines[i]) for i in lettered_idx]
+    else:
+        n_options = default_options
+        if len(block_lines) >= 2:
+            last_two = {block_lines[-2].lower().rstrip('.'), block_lines[-1].lower().rstrip('.')}
+            if last_two == {'verdadero', 'falso'}:
+                n_options = 2
+        if len(block_lines) <= n_options:
+            return None
+        text_lines = block_lines[:-n_options]
+        options = [ln.rstrip('.').strip() if ln.lower().rstrip('.') in ('verdadero', 'falso') else ln
+                   for ln in block_lines[-n_options:]]
+
+    if not text_lines or not options:
+        return None
+
+    return {
+        'text': ' '.join(text_lines),
+        'options': options,
+        'answer': answer,
+    }
+
+
+def parse_docx(filepath: str, default_options: int = 4) -> list[dict]:
     """
     Lee el .docx y devuelve una lista de preguntas con la estructura:
         { 'text': str, 'options': [str, ...], 'answer': str }
     """
     doc = Document(filepath)
     questions: list[dict] = []
-
-    current_text: str | None = None
-    current_options: list[str] = []
-
-    def _flush(answer: str):
-        nonlocal current_text, current_options
-        if current_text and current_options:
-            questions.append({
-                'text': current_text,
-                'options': current_options,
-                'answer': answer,
-            })
-        current_text = None
-        current_options = []
+    block_lines: list[str] = []
 
     for para in doc.paragraphs:
         line = para.text.strip()
@@ -87,15 +116,25 @@ def parse_docx(filepath: str) -> list[dict]:
             continue
 
         if _is_answer(line):
-            _flush(_answer_letter(line))
-        elif _is_option(line):
-            current_options.append(_parse_option(line))
-        else:
-            # Texto de pregunta: si ya había una pregunta abierta, concatenar
-            if current_text is None:
-                current_text = line
+            q = _resolve_block(block_lines, _answer_letter(line), default_options)
+            if q is not None:
+                questions.append(q)
             else:
-                current_text += ' ' + line
+                preview = ' '.join(block_lines)[:60]
+                print(
+                    f"  [ADVERTENCIA] Bloque descartado (no se pudo resolver): {preview}…",
+                    file=sys.stderr,
+                )
+            block_lines = []
+        else:
+            block_lines.append(line)
+
+    if block_lines:
+        print(
+            f"  [ADVERTENCIA] Líneas sobrantes sin ANSWER descartadas: "
+            f"{' '.join(block_lines)[:60]}…",
+            file=sys.stderr,
+        )
 
     return questions
 
@@ -174,17 +213,24 @@ def convert_to_gift(questions: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2:
-        print("Uso: python3 docx_to_gift.py input.docx [output.txt]")
+    args = [a for a in sys.argv[1:]]
+    default_options = 4
+    if '--options' in args:
+        i = args.index('--options')
+        default_options = int(args[i + 1])
+        del args[i:i + 2]
+
+    if not args:
+        print("Uso: python3 docx_to_gift.py [--options N] input.docx [output.txt]")
         sys.exit(1)
 
-    input_path = sys.argv[1]
-    output_path = sys.argv[2] if len(sys.argv) >= 3 else (
+    input_path = args[0]
+    output_path = args[1] if len(args) >= 2 else (
         re.sub(r'\.docx$', '', input_path, flags=re.IGNORECASE) + '.txt'
     )
 
     print(f"Leyendo: {input_path}")
-    questions = parse_docx(input_path)
+    questions = parse_docx(input_path, default_options=default_options)
     print(f"  → {len(questions)} pregunta(s) encontrada(s)")
 
     gift_text = convert_to_gift(questions)
