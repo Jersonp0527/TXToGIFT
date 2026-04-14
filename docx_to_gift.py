@@ -24,6 +24,8 @@ from docx import Document
 OPTION_PATTERN = re.compile(r'^([A-Z])[\.\)]\s+(.+)', re.DOTALL)
 ANSWER_PATTERN = re.compile(r'^ANSWER\s*:\s*([A-Z]?)\s*$', re.IGNORECASE)
 MATCHING_ARROW = re.compile(r'\s*(?:→|->)\s*')  # acepta → (unicode) y ->
+BULLET_PATTERN = re.compile(r'^[\u2022\u25E6\u25AA\u25CF\u00B7]\s*')  # • ◦ ▪ ● ·
+GIFT_ESCAPE_RE = re.compile(r'([\\~=#{}])')
 
 
 def _is_option(text: str) -> bool:
@@ -53,6 +55,48 @@ def _is_matching_option(text: str) -> bool:
 def _normalize_arrow(text: str) -> str:
     """Unifica → y -> en la flecha estándar de GIFT: ' -> '."""
     return MATCHING_ARROW.sub(' -> ', text)
+
+
+def _is_bullet(line: str) -> bool:
+    return bool(BULLET_PATTERN.match(line))
+
+
+def _strip_bullet(line: str) -> str:
+    return BULLET_PATTERN.sub('', line).strip()
+
+
+def _gift_escape(text: str) -> str:
+    """Escapa los caracteres especiales de GIFT: \\ ~ = # { }."""
+    return GIFT_ESCAPE_RE.sub(r'\\\1', text)
+
+
+def _format_question_text(text_lines: list[str]) -> tuple[str, bool]:
+    """
+    Devuelve (texto_gift, es_html).
+
+    Si alguno de los párrafos empieza con viñeta (•, ◦, ▪…), se emite HTML con
+    lista <ul><li> para que Moodle renderice el enunciado en varias líneas en
+    lugar de colapsar los ítems en una sola.
+    """
+    if not any(_is_bullet(ln) for ln in text_lines):
+        return _gift_escape(' '.join(text_lines)), False
+
+    parts: list[str] = []
+    in_list = False
+    for ln in text_lines:
+        if _is_bullet(ln):
+            if not in_list:
+                parts.append('<ul>')
+                in_list = True
+            parts.append(f'<li>{_gift_escape(_strip_bullet(ln))}</li>')
+        else:
+            if in_list:
+                parts.append('</ul>')
+                in_list = False
+            parts.append(f'<p>{_gift_escape(ln)}</p>')
+    if in_list:
+        parts.append('</ul>')
+    return '[html]' + ''.join(parts), True
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +138,9 @@ def _resolve_block(block_lines: list[str], answer: str, default_options: int) ->
     if not text_lines or not options:
         return None
 
+    text, _ = _format_question_text(text_lines)
     return {
-        'text': ' '.join(text_lines),
+        'text': text,
         'options': options,
         'answer': answer,
     }
